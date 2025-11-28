@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from huggingface_hub import PyTorchModelHubMixin # 1. Import the mixin
+from huggingface_hub import PyTorchModelHubMixin
 
 # --- 1. Vector Quantization (VQ) Layer ---
 class VectorQuantizer(nn.Module):
@@ -25,21 +25,19 @@ class VectorQuantizer(nn.Module):
         return z_q, encoding_indices, commitment_loss, codebook_loss
 
 # --- 2. Residual Quantization (RQ) Module ---
-# 2. Inherit from nn.Module AND the mixin
 class ResidualQuantizer(nn.Module, PyTorchModelHubMixin):
-    def __init__(self, num_layers, num_embeddings, embedding_dim, commitment_cost=0.25):
+    def __init__(self, num_layers: int, num_embeddings: int, embedding_dim: int, commitment_cost: float = 0.25):
         super().__init__()
-        # We need to save the config for the mixin to work correctly
-        self.config = {
-            "num_layers": num_layers,
-            "num_embeddings": num_embeddings,
-            "embedding_dim": embedding_dim,
-            "commitment_cost": commitment_cost,
-        }
+        # Store hyperparameters directly as attributes.
+        # The PyTorchModelHubMixin will automatically save these to config.json.
         self.num_layers = num_layers
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.commitment_cost = commitment_cost
+        
         self.quantizers = nn.ModuleList([
-            VectorQuantizer(num_embeddings, embedding_dim, commitment_cost)
-            for _ in range(num_layers)
+            VectorQuantizer(self.num_embeddings, self.embedding_dim, self.commitment_cost)
+            for _ in range(self.num_layers)
         ])
 
     def forward(self, z):
