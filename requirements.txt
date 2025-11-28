@@ -1,0 +1,11 @@
+datasets
+transformers
+openai
+python-dotenv
+sentence-transformers
+pytest
+pytorch-lightning
+tensorboard
+umap-learn
+plotly
+pandas
