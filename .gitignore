@@ -219,5 +219,3 @@ ml-32m/
 *.csv
 *.ckpt
 tb_logs/
-temp_f
-*.html
