@@ -66,7 +66,9 @@ Generate an interactive UMAP visualization of the movie embeddings, colored by t
 python visualize_sids.py
 ```
 
-This will generate an `semantic_id_visualization.html` file in your project directory. Open it in a web browser to view the interactive plot.
+This will generate an `semantic_id_visualization.html` file in your project directory. You can open it in a web browser to view the interactive plot, or view it online at [https://kykamath.github.io/movielens-sids/semantic_id_visualization.html](https://kykamath.github.io/movielens-sids/semantic_id_visualization.html).
+
+![UMAP Visualization Screenshot](assets/umap_visualization_screenshot.png)
 
 ## Hugging Face Resources
 
