@@ -201,7 +201,7 @@ class RQVAEOrchestrator:
         print(f"\n--- Training Complete for Experiment: {log_name} ---")
         
         if self.config.hf_token and checkpoint.best_model_path and not self.config.dummy_run:
-            self._publish(checkpoint, logger) # Pass the logger object
+            self._publish(checkpoint, logger)
         else:
             print("\nDummy run or token not found: Skipping model upload.")
 
@@ -223,16 +223,17 @@ class RQVAEOrchestrator:
         print(f"✅ Model successfully uploaded to {self.config.hub_model_id}")
 
         # --- 2. Tag the Commit ---
-        print(f"Tagging commit with version: '{self.config.experiment_name}'")
+        print(f"Updating tag with version: '{self.config.experiment_name}'")
         api = HfApi()
         api.create_tag(
             repo_id=self.config.hub_model_id,
             tag=self.config.experiment_name,
             tag_message=f"Model for experiment '{self.config.experiment_name}'",
             revision=commit_info.oid,
-            repo_type="model"
+            repo_type="model",
+            exists_ok=True  # *** THIS IS THE FIX ***
         )
-        print(f"✅ Successfully tagged commit with '{self.config.experiment_name}'")
+        print(f"✅ Successfully updated tag '{self.config.experiment_name}'")
 
         # --- 3. Upload TensorBoard Logs ---
         print(f"Uploading TensorBoard logs from: {logger.log_dir}")
