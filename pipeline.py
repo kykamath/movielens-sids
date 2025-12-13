@@ -197,12 +197,24 @@ class RQVAEOrchestrator:
         source_dataset = dataset_manager.load_source_dataset()
         embeddings_tensor, _, _ = embedding_manager.generate(source_dataset)
 
+        # *** THIS IS THE FIX ***
+        # Determine embedding dimension directly from the generated tensor
+        actual_embedding_dim = embeddings_tensor.shape[1]
+        print(f"Actual embedding dimension determined from data: {actual_embedding_dim}")
+        self.config.embedding_dim = actual_embedding_dim
+
         data_module = MovieEmbeddingDataModule(
             embeddings_tensor=embeddings_tensor,
             batch_size=self.config.batch_size
         )
 
-        self.model = RQVAE(num_layers=self.config.num_layers, num_embeddings=self.config.num_embeddings, embedding_dim=self.config.embedding_dim, commitment_cost=self.config.commitment_cost, learning_rate=self.config.learning_rate)
+        self.model = RQVAE(
+            num_layers=self.config.num_layers, 
+            num_embeddings=self.config.num_embeddings, 
+            embedding_dim=self.config.embedding_dim, # Now uses the correct dimension
+            commitment_cost=self.config.commitment_cost, 
+            learning_rate=self.config.learning_rate
+        )
 
         log_name = self.config.experiment_name or "default"
         logger = TensorBoardLogger("tb_logs", name="rq_vae_model", version=log_name)
@@ -225,6 +237,10 @@ class RQVAEOrchestrator:
 
     def _publish(self, checkpoint_callback: ModelCheckpoint):
         """Uploads the best model to the Hub and tags it with the experiment name."""
+        if not self.config.experiment_name or "dummy" in self.config.experiment_name:
+            print("\nSkipping model upload for dummy run.")
+            return
+
         print(f"\nUploading best model from '{checkpoint_callback.best_model_path}' to Hub: {self.config.hub_model_id}")
         best_model = RQVAE.load_from_checkpoint(checkpoint_callback.best_model_path)
         quantizer_model = best_model.quantizer
@@ -235,17 +251,16 @@ class RQVAEOrchestrator:
         )
         print(f"✅ Model successfully uploaded to {self.config.hub_model_id}")
 
-        if self.config.experiment_name:
-            print(f"Tagging commit with experiment name: '{self.config.experiment_name}'")
-            api = HfApi()
-            api.create_tag(
-                repo_id=self.config.hub_model_id,
-                tag=self.config.experiment_name,
-                tag_message=f"Model for experiment '{self.config.experiment_name}'",
-                revision=commit_info.oid,
-                repo_type="model"
-            )
-            print(f"✅ Successfully tagged commit with '{self.config.experiment_name}'")
+        print(f"Tagging commit with experiment name: '{self.config.experiment_name}'")
+        api = HfApi()
+        api.create_tag(
+            repo_id=self.config.hub_model_id,
+            tag=self.config.experiment_name,
+            tag_message=f"Model for experiment '{self.config.experiment_name}'",
+            revision=commit_info.oid,
+            repo_type="model"
+        )
+        print(f"✅ Successfully tagged commit with '{self.config.experiment_name}'")
 
     def load_from_hub(self, revision: Optional[str] = None) -> ResidualQuantizer:
         """Loads a pre-trained model. In dummy mode, initializes a new model instead."""
