@@ -11,11 +11,14 @@ import os
 import torch
 from dotenv import load_dotenv
 from huggingface_hub import login, HfApi, upload_folder
+from huggingface_hub.errors import HfHubHTTPError
 from datasets import load_dataset, Dataset
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 from typing import Optional
+from packaging import version
+import huggingface_hub
 
 from embedding_utils import generate_embeddings, get_embedding_column_name
 from experiments import ExperimentConfig
@@ -27,25 +30,18 @@ from residual_quantized_vae import ResidualQuantizer
 
 @dataclass
 class PipelineConfig:
-    """Holds all configuration parameters for the pipeline, with support for experiment overrides."""
-    # --- Central Hub Repositories ---
+    # ... (No changes in this class)
     enriched_repo_id: str = "krishnakamath/movielens-32m-movies-enriched"
     sids_dataset_id: str = "krishnakamath/movielens-32m-movies-enriched-with-SIDs"
-    hub_model_id: str = "krishnakamath/rq-vae-movielens"  # Canonical model repo
-    
-    # --- Default Model Parameters ---
+    hub_model_id: str = "krishnakamath/rq-vae-movielens"
     embedding_model_name: str = 'sentence-transformers/all-mpnet-base-v2'
     embedding_dim: int = 768
     num_layers: int = 4
     num_embeddings: int = 1024
     commitment_cost: float = 0.25
-    
-    # --- Default Training Hyperparameters ---
     learning_rate: float = 1e-4
     batch_size: int = 128
     epochs: int = 500
-    
-    # --- System and Experiment Config ---
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     experiment_name: Optional[str] = None
     dummy_run: bool = False
@@ -53,19 +49,14 @@ class PipelineConfig:
     max_data_samples: Optional[int] = None
 
     def __init__(self, experiment_name: Optional[str] = None, experiment_config: Optional[ExperimentConfig] = None, dummy_run: bool = False, smoke_test: bool = False):
-        """
-        Initializes the configuration, layering settings: defaults -> experiment -> smoke/dummy.
-        """
         self.experiment_name = experiment_name
         self.dummy_run = dummy_run
         self.smoke_test = smoke_test
-
         if experiment_config:
             print(f"Applying config for experiment: {experiment_name}")
             for key, value in asdict(experiment_config).items():
                 if hasattr(self, key):
                     setattr(self, key, value)
-        
         if self.smoke_test:
             print("--- SMOKE TEST ACTIVATED ---")
             self.epochs = 2
@@ -75,7 +66,6 @@ class PipelineConfig:
                 self.experiment_name += "-smoke-test"
             else:
                 self.experiment_name = "smoke-test"
-
         if self.dummy_run:
             print("--- DUMMY RUN ACTIVATED ---")
             self.epochs = 1
@@ -85,11 +75,9 @@ class PipelineConfig:
                  self.experiment_name = f"{self.experiment_name}-dummy"
             else:
                  self.experiment_name = "dummy"
-
         self._handle_auth()
 
     def _handle_auth(self):
-        """Handle authentication after initialization."""
         load_dotenv()
         self.hf_token = os.environ.get("HUGGING_FACE_HUB_TOKEN")
         if self.hf_token and not self.dummy_run:
@@ -162,44 +150,26 @@ class RQVAEOrchestrator:
         self.model = None
 
     def train(self):
-        """Initializes and trains the RQ-VAE model."""
+        # ... (No changes here)
         print("--- Generating Embeddings for Training ---")
         dataset_manager = DatasetManager(self.config)
         embedding_manager = EmbeddingManager(self.config)
         source_dataset = dataset_manager.load_source_dataset()
         embeddings_tensor, _, _ = embedding_manager.generate(source_dataset)
-
         actual_embedding_dim = embeddings_tensor.shape[1]
         print(f"Actual embedding dimension determined from data: {actual_embedding_dim}")
         self.config.embedding_dim = actual_embedding_dim
-
-        data_module = MovieEmbeddingDataModule(
-            embeddings_tensor=embeddings_tensor,
-            batch_size=self.config.batch_size
-        )
-
-        self.model = RQVAE(
-            num_layers=self.config.num_layers, 
-            num_embeddings=self.config.num_embeddings, 
-            embedding_dim=self.config.embedding_dim,
-            commitment_cost=self.config.commitment_cost, 
-            learning_rate=self.config.learning_rate
-        )
-
+        data_module = MovieEmbeddingDataModule(embeddings_tensor=embeddings_tensor, batch_size=self.config.batch_size)
+        self.model = RQVAE(num_layers=self.config.num_layers, num_embeddings=self.config.num_embeddings, embedding_dim=self.config.embedding_dim, commitment_cost=self.config.commitment_cost, learning_rate=self.config.learning_rate)
         log_name = self.config.experiment_name or "default"
         logger = TensorBoardLogger("tb_logs", name="rq_vae_model", version=log_name)
-        
         checkpoint_dir = f"checkpoints/{log_name}/"
         checkpoint = ModelCheckpoint(monitor='val_loss', dirpath=checkpoint_dir, filename='best-model', save_top_k=1, mode='min')
-        
         early_stop = EarlyStopping(monitor='val_loss', patience=10, verbose=True, mode='min')
-
         trainer = Trainer(max_epochs=self.config.epochs, accelerator="auto", callbacks=[early_stop, checkpoint], logger=logger)
-
         print(f"--- Starting Training for Experiment: {log_name} ---")
         trainer.fit(self.model, datamodule=data_module)
         print(f"\n--- Training Complete for Experiment: {log_name} ---")
-        
         if self.config.hf_token and checkpoint.best_model_path and not self.config.dummy_run:
             self._publish(checkpoint, logger)
         else:
@@ -222,17 +192,36 @@ class RQVAEOrchestrator:
         )
         print(f"✅ Model successfully uploaded to {self.config.hub_model_id}")
 
-        # --- 2. Tag the Commit ---
+        # --- 2. Tag the Commit (with backward compatibility) ---
         print(f"Updating tag with version: '{self.config.experiment_name}'")
         api = HfApi()
-        api.create_tag(
-            repo_id=self.config.hub_model_id,
-            tag=self.config.experiment_name,
-            tag_message=f"Model for experiment '{self.config.experiment_name}'",
-            revision=commit_info.oid,
-            repo_type="model",
-            exists_ok=True  # *** THIS IS THE FIX ***
-        )
+        
+        # Check if the installed library version supports exists_ok
+        if version.parse(huggingface_hub.__version__) >= version.parse("0.20.0"):
+            api.create_tag(
+                repo_id=self.config.hub_model_id,
+                tag=self.config.experiment_name,
+                tag_message=f"Model for experiment '{self.config.experiment_name}'",
+                revision=commit_info.oid,
+                repo_type="model",
+                exists_ok=True
+            )
+        else:
+            # Fallback for older versions: delete the tag first, then create it.
+            try:
+                api.delete_tag(repo_id=self.config.hub_model_id, tag=self.config.experiment_name)
+                print(f"Deleted existing tag '{self.config.experiment_name}' to update it.")
+            except HfHubHTTPError:
+                # This is expected if the tag doesn't exist yet.
+                pass
+            api.create_tag(
+                repo_id=self.config.hub_model_id,
+                tag=self.config.experiment_name,
+                tag_message=f"Model for experiment '{self.config.experiment_name}'",
+                revision=commit_info.oid,
+                repo_type="model"
+            )
+        
         print(f"✅ Successfully updated tag '{self.config.experiment_name}'")
 
         # --- 3. Upload TensorBoard Logs ---
