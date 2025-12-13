@@ -2,37 +2,40 @@
 train.py
 
 This script orchestrates the training of the RQ-VAE model using the modular,
-OOP-based pipeline. It supports running different experiments and a dummy mode for quick tests.
+OOP-based pipeline. It supports running different experiments, a dummy mode, and a smoke test mode.
 
 This script can be run from the command line with the following optional arguments:
 
 --experiment [name]
     Description:
         Specifies which experiment configuration to run. The available experiments
-        are defined in the `experiments.py` file. Each experiment can have its own
-        embedding model, hyperparameters, and Hugging Face Hub model ID.
+        are defined in the `experiments.py` file.
 
     Usage:
         `python train.py --experiment roberta-large`
 
-    If this argument is not provided, the script will run using the default
-    parameters defined in `PipelineConfig`.
-
 --dummy
     Description:
-        Activates a "dummy run" mode. This is used for quickly testing the end-to-end
-        pipeline without waiting for a full training cycle. When this flag is set,
-        the script will:
-        - Use a very small subset of the data.
-        - Train for only one epoch.
-        - Skip uploading the final model to the Hugging Face Hub.
-    
-    This flag can be combined with `--experiment` to test a specific experiment's
-    configuration in dummy mode.
+        Activates a "dummy run" mode for the quickest possible local test. It uses
+        a minimal dataset, runs for one epoch, and DOES NOT upload anything.
+        This is for checking if the code runs without syntax errors.
 
     Usage:
         `python train.py --dummy`
-        `python train.py --experiment roberta-large --dummy`
+
+--smoke-test
+    Description:
+        Activates a "smoke test" mode for a true end-to-end integration test.
+        It uses a small dataset, runs for a few epochs, and UPLOADS the resulting
+        model to a separate "-smoke-test" repository on the Hub. This verifies
+        the entire pipeline, including authentication and uploads.
+
+    Usage:
+        `python train.py --smoke-test`
+        `python train.py --experiment roberta-large --smoke-test`
+
+Note:
+    `--dummy` and `--smoke-test` are mutually exclusive. `--dummy` takes precedence.
 """
 
 import argparse
@@ -42,14 +45,14 @@ from experiments import EXPERIMENTS
 def main():
     """
     Main training workflow.
-    1. Parses command-line arguments for experiment name and dummy run mode.
-    2. Loads the appropriate configuration.
+    1. Parses command-line arguments.
+    2. Loads the appropriate configuration based on the selected mode.
     3. Initializes the RQ-VAE orchestrator.
     4. Starts the training process.
     """
     parser = argparse.ArgumentParser(
         description="Train an RQ-VAE model with a specified experiment configuration.",
-        formatter_class=argparse.RawTextHelpFormatter # To preserve formatting of help messages
+        formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument(
         '--experiment', 
@@ -61,19 +64,26 @@ def main():
     parser.add_argument(
         '--dummy',
         action='store_true',
-        help='If set, runs in dummy mode on a small subset of data for a quick end-to-end test.'
+        help='Run in dummy mode for a quick local test (no uploads).'
+    )
+    parser.add_argument(
+        '--smoke-test',
+        action='store_true',
+        help='Run in smoke test mode for a full end-to-end test (with uploads).'
     )
     args = parser.parse_args()
 
-    # Get the experiment config if an experiment is specified
+    if args.dummy and args.smoke_test:
+        print("Warning: Both --dummy and --smoke-test were provided. --dummy takes precedence.")
+        args.smoke_test = False
+
     experiment_config = EXPERIMENTS.get(args.experiment) if args.experiment else None
 
-    # Initialize configuration. The PipelineConfig class now handles all the logic
-    # for layering the default, experiment, and dummy configurations.
     config = PipelineConfig(
         experiment_name=args.experiment, 
         experiment_config=experiment_config, 
-        dummy_run=args.dummy
+        dummy_run=args.dummy,
+        smoke_test=args.smoke_test
     )
     
     orchestrator = RQVAEOrchestrator(config)

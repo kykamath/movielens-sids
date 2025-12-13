@@ -1,38 +1,40 @@
 """
 create_final_dataset.py
 
-This script orchestrates the creation of the final dataset with Semantic IDs (SIDs)
-using the modular, OOP-based pipeline. It supports using models from different experiments
-and a dummy mode for quick tests.
+This script orchestrates the creation of the final dataset with Semantic IDs (SIDs).
+It supports using models from different experiments, a dummy mode, and a smoke test mode.
 
 This script can be run from the command line with the following optional arguments:
 
 --experiment [name]
     Description:
         Specifies which experiment's model to use for generating the dataset.
-        The script will load the model version tagged with the experiment name from
-        the Hugging Face Hub. The available experiments are defined in `experiments.py`.
+        The script will load the model version tagged with the experiment name.
 
     Usage:
         `python create_final_dataset.py --experiment roberta-large`
 
-    If this argument is not provided, the script will use the model from the `main`
-    branch of the default Hub repository.
-
 --dummy
     Description:
-        Activates a "dummy run" mode for quick end-to-end testing. When this flag
-        is set, the script will:
-        - Use a very small subset of the data.
-        - Generate SIDs using a new, untrained model (skipping the download).
-        - Skip uploading the final dataset to the Hugging Face Hub.
-
-    This flag can be combined with `--experiment` to test a specific experiment's
-    configuration in dummy mode.
+        Activates a "dummy run" mode for the quickest possible local test. It uses
+        a minimal dataset, generates SIDs with a new untrained model, and DOES NOT
+        upload the dataset.
 
     Usage:
         `python create_final_dataset.py --dummy`
-        `python create_final_dataset.py --experiment roberta-large --dummy`
+
+--smoke-test
+    Description:
+        Activates a "smoke test" mode for a true end-to-end integration test.
+        It uses a small dataset, loads the corresponding "-smoke-test" model from
+        the Hub, and UPLOADS the resulting dataset.
+
+    Usage:
+        `python create_final_dataset.py --smoke-test`
+        `python create_final_dataset.py --experiment roberta-large --smoke-test`
+
+Note:
+    `--dummy` and `--smoke-test` are mutually exclusive. `--dummy` takes precedence.
 """
 
 import argparse
@@ -42,37 +44,45 @@ from experiments import EXPERIMENTS
 def main():
     """
     Main workflow for creating the final dataset.
-    1. Parses command-line arguments for experiment name and dummy run mode.
-    2. Initializes configuration based on the selected settings.
-    3. Runs the full pipeline: load data, generate embeddings, load model, generate SIDs.
+    1. Parses command-line arguments.
+    2. Initializes configuration based on the selected mode.
+    3. Runs the full pipeline.
     4. Creates and (optionally) uploads the final dataset.
     """
     parser = argparse.ArgumentParser(
         description="Create a dataset with SIDs using a model from a specified experiment.",
-        formatter_class=argparse.RawTextHelpFormatter # To preserve formatting of help messages
+        formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument(
         '--experiment', 
         type=str, 
         default=None,
         choices=list(EXPERIMENTS.keys()),
-        help='The name of the experiment whose model should be used, as defined in experiments.py.'
+        help='The name of the experiment whose model should be used.'
     )
     parser.add_argument(
         '--dummy',
         action='store_true',
-        help='If set, runs in dummy mode on a small subset of data for a quick end-to-end test.'
+        help='Run in dummy mode for a quick local test (no uploads).'
+    )
+    parser.add_argument(
+        '--smoke-test',
+        action='store_true',
+        help='Run in smoke test mode for a full end-to-end test (with uploads).'
     )
     args = parser.parse_args()
 
-    # Get the experiment config if an experiment is specified
+    if args.dummy and args.smoke_test:
+        print("Warning: Both --dummy and --smoke-test were provided. --dummy takes precedence.")
+        args.smoke_test = False
+
     experiment_config = EXPERIMENTS.get(args.experiment) if args.experiment else None
 
-    # Initialize configuration and managers. The PipelineConfig class handles all logic.
     config = PipelineConfig(
         experiment_name=args.experiment, 
         experiment_config=experiment_config, 
-        dummy_run=args.dummy
+        dummy_run=args.dummy,
+        smoke_test=args.smoke_test
     )
     dataset_manager = DatasetManager(config)
     embedding_manager = EmbeddingManager(config)

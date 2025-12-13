@@ -51,14 +51,16 @@ class PipelineConfig:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     experiment_name: Optional[str] = None
     dummy_run: bool = False
+    smoke_test: bool = False
     max_data_samples: Optional[int] = None
 
-    def __init__(self, experiment_name: Optional[str] = None, experiment_config: Optional[ExperimentConfig] = None, dummy_run: bool = False):
+    def __init__(self, experiment_name: Optional[str] = None, experiment_config: Optional[ExperimentConfig] = None, dummy_run: bool = False, smoke_test: bool = False):
         """
-        Initializes the configuration, layering settings: defaults -> experiment -> dummy.
+        Initializes the configuration, layering settings: defaults -> experiment -> smoke/dummy.
         """
         self.experiment_name = experiment_name
         self.dummy_run = dummy_run
+        self.smoke_test = smoke_test
 
         # 1. Apply experiment overrides first
         if experiment_config:
@@ -67,17 +69,30 @@ class PipelineConfig:
                 if hasattr(self, key):
                     setattr(self, key, value)
         
-        # 2. Apply dummy run overrides on top
+        # 2. Apply smoke test overrides
+        if self.smoke_test:
+            print("--- SMOKE TEST ACTIVATED ---")
+            self.epochs = 2
+            self.batch_size = 8
+            self.max_data_samples = 64
+            if self.hub_model_id:
+                self.hub_model_id += "-smoke-test"
+            if self.experiment_name:
+                self.experiment_name += "-smoke-test"
+            else:
+                self.experiment_name = "smoke-test"
+
+        # 3. Dummy run overrides everything
         if self.dummy_run:
             print("--- DUMMY RUN ACTIVATED ---")
             self.epochs = 1
             self.batch_size = 4
             self.max_data_samples = 16
-            # If an experiment is being run in dummy mode, append "-dummy" for clarity in logs
-            if self.experiment_name:
-                self.experiment_name = f"{self.experiment_name}-dummy"
+            if self.experiment_name and not self.smoke_test:
+                 self.experiment_name = f"{self.experiment_name}-dummy"
             else:
-                self.experiment_name = "dummy"
+                 self.experiment_name = "dummy"
+
 
         self._handle_auth()
 
@@ -85,6 +100,7 @@ class PipelineConfig:
         """Handle authentication after initialization."""
         load_dotenv()
         self.hf_token = os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        # Log in if we have a token and this is NOT a dummy run
         if self.hf_token and not self.dummy_run:
             print("Logging in to Hugging Face Hub...")
             login(token=self.hf_token)
@@ -93,7 +109,7 @@ class PipelineConfig:
         else:
             print("Warning: HUGGING_FACE_HUB_TOKEN not found. Uploads will be skipped.")
 
-# --- Pipeline Components (Rest of the file is unchanged) ---
+# --- Pipeline Components ---
 
 class DatasetManager:
     """Handles loading and preparation of datasets."""
@@ -101,7 +117,7 @@ class DatasetManager:
         self.config = config
 
     def load_source_dataset(self) -> Dataset:
-        """Loads the source enriched dataset from the Hub, slicing if in dummy mode."""
+        """Loads the source enriched dataset from the Hub, slicing if needed."""
         print(f"Loading source dataset from: {self.config.enriched_repo_id}")
         dataset = load_dataset(self.config.enriched_repo_id, split="train")
         if self.config.max_data_samples:
@@ -175,20 +191,17 @@ class RQVAEOrchestrator:
 
     def train(self):
         """Initializes and trains the RQ-VAE model."""
-        # Step 1: Generate embeddings first
         print("--- Generating Embeddings for Training ---")
         dataset_manager = DatasetManager(self.config)
         embedding_manager = EmbeddingManager(self.config)
         source_dataset = dataset_manager.load_source_dataset()
         embeddings_tensor, _, _ = embedding_manager.generate(source_dataset)
 
-        # Step 2: Initialize DataModule with the generated embeddings
         data_module = MovieEmbeddingDataModule(
             embeddings_tensor=embeddings_tensor,
             batch_size=self.config.batch_size
         )
 
-        # Step 3: Initialize and train the model
         self.model = RQVAE(num_layers=self.config.num_layers, num_embeddings=self.config.num_embeddings, embedding_dim=self.config.embedding_dim, commitment_cost=self.config.commitment_cost, learning_rate=self.config.learning_rate)
 
         log_name = self.config.experiment_name or "default"
@@ -212,11 +225,6 @@ class RQVAEOrchestrator:
 
     def _publish(self, checkpoint_callback: ModelCheckpoint):
         """Uploads the best model to the Hub and tags it with the experiment name."""
-        # Do not publish if the experiment name was overwritten for a dummy run
-        if not self.config.experiment_name or "dummy" in self.config.experiment_name:
-            print("\nSkipping model upload for dummy run.")
-            return
-
         print(f"\nUploading best model from '{checkpoint_callback.best_model_path}' to Hub: {self.config.hub_model_id}")
         best_model = RQVAE.load_from_checkpoint(checkpoint_callback.best_model_path)
         quantizer_model = best_model.quantizer
@@ -227,16 +235,17 @@ class RQVAEOrchestrator:
         )
         print(f"✅ Model successfully uploaded to {self.config.hub_model_id}")
 
-        print(f"Tagging commit with experiment name: '{self.config.experiment_name}'")
-        api = HfApi()
-        api.create_tag(
-            repo_id=self.config.hub_model_id,
-            tag=self.config.experiment_name,
-            tag_message=f"Model for experiment '{self.config.experiment_name}'",
-            revision=commit_info.oid,
-            repo_type="model"
-        )
-        print(f"✅ Successfully tagged commit with '{self.config.experiment_name}'")
+        if self.config.experiment_name:
+            print(f"Tagging commit with experiment name: '{self.config.experiment_name}'")
+            api = HfApi()
+            api.create_tag(
+                repo_id=self.config.hub_model_id,
+                tag=self.config.experiment_name,
+                tag_message=f"Model for experiment '{self.config.experiment_name}'",
+                revision=commit_info.oid,
+                repo_type="model"
+            )
+            print(f"✅ Successfully tagged commit with '{self.config.experiment_name}'")
 
     def load_from_hub(self, revision: Optional[str] = None) -> ResidualQuantizer:
         """Loads a pre-trained model. In dummy mode, initializes a new model instead."""
