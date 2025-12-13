@@ -1,90 +1,85 @@
-import os
-from dotenv import load_dotenv
-from huggingface_hub import login
-import pytorch_lightning as pl
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-from pytorch_lightning.loggers import TensorBoardLogger
+"""
+train.py
 
-from rqvae_lightning import RQVAE, MovieEmbeddingDataModule
-from models import HUB_ENRICHED_REPO_ID, HUB_MODEL_ID # Import HUB_MODEL_ID
+This script orchestrates the training of the RQ-VAE model using the modular,
+OOP-based pipeline. It supports running different experiments and a dummy mode for quick tests.
 
-# --- 1. Hyperparameters ---
-# Model Hyperparameters
-EMBEDDING_DIM = 768
-NUM_LAYERS = 4
-NUM_EMBEDDINGS = 1024
-COMMITMENT_COST = 0.25
+This script can be run from the command line with the following optional arguments:
 
-# Training Hyperparameters
-LEARNING_RATE = 1e-4
-BATCH_SIZE = 128
-EPOCHS = 500
-# HUB_MODEL_ID is now imported from models.py
+--experiment [name]
+    Description:
+        Specifies which experiment configuration to run. The available experiments
+        are defined in the `experiments.py` file. Each experiment can have its own
+        embedding model, hyperparameters, and Hugging Face Hub model ID.
+
+    Usage:
+        `python train.py --experiment roberta-large`
+
+    If this argument is not provided, the script will run using the default
+    parameters defined in `PipelineConfig`.
+
+--dummy
+    Description:
+        Activates a "dummy run" mode. This is used for quickly testing the end-to-end
+        pipeline without waiting for a full training cycle. When this flag is set,
+        the script will:
+        - Use a very small subset of the data.
+        - Train for only one epoch.
+        - Skip uploading the final model to the Hugging Face Hub.
+    
+    This flag can be combined with `--experiment` to test a specific experiment's
+    configuration in dummy mode.
+
+    Usage:
+        `python train.py --dummy`
+        `python train.py --experiment roberta-large --dummy`
+"""
+
+import argparse
+from pipeline import PipelineConfig, RQVAEOrchestrator
+from experiments import EXPERIMENTS
 
 def main():
-    # --- 2. Authentication and Setup ---
-    load_dotenv()
-    hf_token = os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    if hf_token:
-        print("Logging in to Hugging Face Hub...")
-        login(token=hf_token)
-    else:
-        print("Warning: HUGGING_FACE_HUB_TOKEN not found. Model will not be uploaded.")
-
-    # --- 3. Initialize DataModule ---
-    print("Initializing DataModule...")
-    data_module = MovieEmbeddingDataModule(enriched_repo_id=HUB_ENRICHED_REPO_ID, batch_size=BATCH_SIZE)
-
-    # --- 4. Initialize Model ---
-    print("Initializing RQ-VAE model...")
-    model = RQVAE(
-        num_layers=NUM_LAYERS,
-        num_embeddings=NUM_EMBEDDINGS,
-        embedding_dim=EMBEDDING_DIM,
-        commitment_cost=COMMITMENT_COST,
-        learning_rate=LEARNING_RATE
+    """
+    Main training workflow.
+    1. Parses command-line arguments for experiment name and dummy run mode.
+    2. Loads the appropriate configuration.
+    3. Initializes the RQ-VAE orchestrator.
+    4. Starts the training process.
+    """
+    parser = argparse.ArgumentParser(
+        description="Train an RQ-VAE model with a specified experiment configuration.",
+        formatter_class=argparse.RawTextHelpFormatter # To preserve formatting of help messages
     )
-
-    # --- 5. Configure Callbacks and Logger ---
-    print("Configuring callbacks and logger...")
-    early_stop_callback = EarlyStopping(monitor='val_loss', patience=10, verbose=True, mode='min')
-    checkpoint_callback = ModelCheckpoint(
-        monitor='val_loss',
-        dirpath='checkpoints/',
-        filename='rqvae-best-model-{epoch:02d}-{val_loss:.4f}',
-        save_top_k=1,
-        mode='min',
+    parser.add_argument(
+        '--experiment', 
+        type=str, 
+        default=None,
+        choices=list(EXPERIMENTS.keys()),
+        help='The name of the experiment to run, as defined in experiments.py.'
     )
-    logger = TensorBoardLogger("tb_logs", name="rq_vae_model")
-
-    # --- 6. Initialize and Run Trainer ---
-    print("Initializing PyTorch Lightning Trainer...")
-    trainer = pl.Trainer(
-        max_epochs=EPOCHS,
-        accelerator="auto",
-        callbacks=[early_stop_callback, checkpoint_callback],
-        logger=logger
+    parser.add_argument(
+        '--dummy',
+        action='store_true',
+        help='If set, runs in dummy mode on a small subset of data for a quick end-to-end test.'
     )
+    args = parser.parse_args()
 
-    print("Starting Training...")
-    trainer.fit(model, datamodule=data_module)
+    # Get the experiment config if an experiment is specified
+    experiment_config = EXPERIMENTS.get(args.experiment) if args.experiment else None
 
-    print("\nTraining Complete.")
-    print(f"Best model saved locally at: {checkpoint_callback.best_model_path}")
-
-    # --- 7. Upload Best Model to Hugging Face Hub ---
-    if hf_token and checkpoint_callback.best_model_path:
-        print(f"\nUploading best model from '{checkpoint_callback.best_model_path}' to Hugging Face Hub...")
-        best_model = RQVAE.load_from_checkpoint(checkpoint_callback.best_model_path)
-        quantizer_model = best_model.quantizer
-        
-        quantizer_model.push_to_hub(
-            repo_id=HUB_MODEL_ID,
-            commit_message=f"Upload best model from epoch {best_model.current_epoch} with val_loss {checkpoint_callback.best_model_score:.4f}"
-        )
-        print(f"✅ Model successfully uploaded to {HUB_MODEL_ID}")
-    else:
-        print("\nSkipping model upload to Hugging Face Hub.")
+    # Initialize configuration. The PipelineConfig class now handles all the logic
+    # for layering the default, experiment, and dummy configurations.
+    config = PipelineConfig(
+        experiment_name=args.experiment, 
+        experiment_config=experiment_config, 
+        dummy_run=args.dummy
+    )
+    
+    orchestrator = RQVAEOrchestrator(config)
+    orchestrator.train()
+    
+    print("\n--- Training Script Finished ---")
 
 if __name__ == '__main__':
     main()

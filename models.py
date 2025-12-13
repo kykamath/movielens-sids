@@ -8,7 +8,14 @@ HUB_SIDS_DATASET_ID = "krishnakamath/movielens-32m-movies-enriched-with-SIDs"
 HUB_MODEL_ID = "krishnakamath/rq-vae-movielens"
 
 # --- Model Configuration ---
-EMBEDDING_MODEL_NAME = 'sentence-transformers/all-mpnet-base-v2'
+# You can easily switch between models by changing which line is commented out.
+EMBEDDING_MODEL_NAME_BASE = 'sentence-transformers/all-mpnet-base-v2'
+EMBEDDING_MODEL_NAME_LARGE = 'sentence-transformers/all-roberta-large-v1'
+EMBEDDING_MODEL_NAME_KALM = 'tencent/KaLM-Embedding-Gemma3-12B-2511' # A powerful, large-scale embedding model
+
+# The model currently being used for generation.
+# Change this to experiment with different embedding models.
+EMBEDDING_MODEL_NAME = EMBEDDING_MODEL_NAME_BASE
 
 @dataclass
 class Movie:
@@ -18,7 +25,6 @@ class Movie:
     plot_summary: str = ""
     director: str = ""
     stars: List[str] = field(default_factory=list)
-    all_mpnet_base_v2_embedding: List[float] = field(default_factory=list)
 
     def to_embedding_string(self) -> str:
         """

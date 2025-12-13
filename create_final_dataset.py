@@ -1,106 +1,101 @@
-import torch
-from datasets import load_dataset, Dataset
-from sentence_transformers import SentenceTransformer
-from huggingface_hub import login
-from dotenv import load_dotenv
-import os
-from models import Movie, HUB_ENRICHED_REPO_ID, HUB_MODEL_ID, HUB_SIDS_DATASET_ID, EMBEDDING_MODEL_NAME
-from residual_quantized_vae import ResidualQuantizer
+"""
+create_final_dataset.py
+
+This script orchestrates the creation of the final dataset with Semantic IDs (SIDs)
+using the modular, OOP-based pipeline. It supports using models from different experiments
+and a dummy mode for quick tests.
+
+This script can be run from the command line with the following optional arguments:
+
+--experiment [name]
+    Description:
+        Specifies which experiment's model to use for generating the dataset.
+        The script will load the model version tagged with the experiment name from
+        the Hugging Face Hub. The available experiments are defined in `experiments.py`.
+
+    Usage:
+        `python create_final_dataset.py --experiment roberta-large`
+
+    If this argument is not provided, the script will use the model from the `main`
+    branch of the default Hub repository.
+
+--dummy
+    Description:
+        Activates a "dummy run" mode for quick end-to-end testing. When this flag
+        is set, the script will:
+        - Use a very small subset of the data.
+        - Generate SIDs using a new, untrained model (skipping the download).
+        - Skip uploading the final dataset to the Hugging Face Hub.
+
+    This flag can be combined with `--experiment` to test a specific experiment's
+    configuration in dummy mode.
+
+    Usage:
+        `python create_final_dataset.py --dummy`
+        `python create_final_dataset.py --experiment roberta-large --dummy`
+"""
+
+import argparse
+from pipeline import PipelineConfig, DatasetManager, EmbeddingManager, RQVAEOrchestrator
+from experiments import EXPERIMENTS
 
 def main():
     """
-    This script creates the final, comprehensive dataset by:
-    1. Loading the base enriched text data.
-    2. Loading the pre-trained RQ-VAE model.
-    3. Generating embeddings for the text data on the fly.
-    4. Using the RQ-VAE model to generate Semantic IDs from the embeddings.
-    5. Adding both the embeddings and the SIDs to the dataset and uploading it to the Hub.
+    Main workflow for creating the final dataset.
+    1. Parses command-line arguments for experiment name and dummy run mode.
+    2. Initializes configuration based on the selected settings.
+    3. Runs the full pipeline: load data, generate embeddings, load model, generate SIDs.
+    4. Creates and (optionally) uploads the final dataset.
     """
-    # --- 1. Authentication ---
-    load_dotenv()
-    hf_token = os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    if hf_token:
-        print("Logging in to Hugging Face Hub...")
-        login(token=hf_token)
-    else:
-        print("Warning: HUGGING_FACE_HUB_TOKEN not found. Cannot upload dataset.")
-        return
+    parser = argparse.ArgumentParser(
+        description="Create a dataset with SIDs using a model from a specified experiment.",
+        formatter_class=argparse.RawTextHelpFormatter # To preserve formatting of help messages
+    )
+    parser.add_argument(
+        '--experiment', 
+        type=str, 
+        default=None,
+        choices=list(EXPERIMENTS.keys()),
+        help='The name of the experiment whose model should be used, as defined in experiments.py.'
+    )
+    parser.add_argument(
+        '--dummy',
+        action='store_true',
+        help='If set, runs in dummy mode on a small subset of data for a quick end-to-end test.'
+    )
+    args = parser.parse_args()
 
-    # --- 2. Load Models and Source Data ---
-    print(f"Loading pre-trained RQ-VAE model from Hugging Face Hub: {HUB_MODEL_ID}")
+    # Get the experiment config if an experiment is specified
+    experiment_config = EXPERIMENTS.get(args.experiment) if args.experiment else None
+
+    # Initialize configuration and managers. The PipelineConfig class handles all logic.
+    config = PipelineConfig(
+        experiment_name=args.experiment, 
+        experiment_config=experiment_config, 
+        dummy_run=args.dummy
+    )
+    dataset_manager = DatasetManager(config)
+    embedding_manager = EmbeddingManager(config)
+    model_orchestrator = RQVAEOrchestrator(config)
+
     try:
-        rq_model = ResidualQuantizer.from_pretrained(HUB_MODEL_ID)
-    except Exception as e:
-        print(f"Could not load model from Hub. Error: {e}")
+        source_dataset = dataset_manager.load_source_dataset()
+        embeddings_tensor, items_with_plots_indices, embeddings_list = embedding_manager.generate(source_dataset)
+        rq_model = model_orchestrator.load_from_hub()
+        sids = model_orchestrator.generate_sids(rq_model, embeddings_tensor)
+        final_dataset = dataset_manager.create_final_dataset(
+            source_dataset, 
+            embeddings_list, 
+            sids, 
+            items_with_plots_indices
+        )
+        dataset_manager.push_to_hub(final_dataset)
+
+    except (ValueError, RuntimeError) as e:
+        print(f"\n❌ An error occurred: {e}")
         return
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    rq_model = rq_model.to(device)
-    rq_model.eval()
-    print(f"Using device: {device}")
-
-    print(f"Loading source enriched dataset from: {HUB_ENRICHED_REPO_ID}")
-    source_dataset = load_dataset(HUB_ENRICHED_REPO_ID, split="train")
-
-    # --- 3. Generate Embeddings ---
-    print(f"Generating embeddings using '{EMBEDDING_MODEL_NAME}'...")
-    embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-    
-    texts_to_embed = []
-    items_with_plots_indices = []
-    
-    for i, item in enumerate(source_dataset):
-        if item.get('plot_summary'):
-            # Manually map fields to handle schema mismatches and ignore old columns
-            movie = Movie(
-                movie_id=item.get('movie_id'),
-                title=item.get('title'),
-                genres=item.get('genres', []),
-                plot_summary=item.get('plot_summary', ''),
-                director=item.get('director', ''),
-                stars=item.get('stars', [])
-                # We do not load any embedding field here, as we are about to generate a new one
-            )
-            texts_to_embed.append(movie.to_embedding_string())
-            items_with_plots_indices.append(i)
-
-    if not texts_to_embed:
-        print("No valid texts found to generate embeddings.")
-        return
-
-    embeddings = embedding_model.encode(texts_to_embed, show_progress_bar=True, device=device)
-    embeddings_tensor = torch.tensor(embeddings, dtype=torch.float32).to(device)
-
-    # --- 4. Generate Semantic IDs ---
-    print("Generating Semantic IDs from embeddings...")
-    with torch.no_grad():
-        _, sids_tensor, _ = rq_model(embeddings_tensor)
-        all_semantic_ids = sids_tensor.cpu().numpy().tolist()
-
-    # --- 5. Combine and Upload Final Dataset ---
-    print("Combining original data with new embeddings and Semantic IDs...")
-    
-    movie_id_to_embedding = {source_dataset[i]['movie_id']: emb.tolist() for i, emb in zip(items_with_plots_indices, embeddings)}
-    movie_id_to_sid = {source_dataset[i]['movie_id']: sid for i, sid in zip(items_with_plots_indices, all_semantic_ids)}
-
-    def add_embeddings_and_sids(example):
-        movie_id = example['movie_id']
-        example['all_mpnet_base_v2_embedding'] = movie_id_to_embedding.get(movie_id, [])
-        example['semantic_id'] = movie_id_to_sid.get(movie_id, [])
-        return example
-
-    # Use .map() for a clean and efficient update
-    final_dataset = source_dataset.map(add_embeddings_and_sids)
-    
-    # Remove the old, now-irrelevant embedding column if it exists
-    if 'all_MiniLM_L12_v2_embedding' in final_dataset.column_names:
-        final_dataset = final_dataset.remove_columns(['all_MiniLM_L12_v2_embedding'])
-
-    print(f"\nUploading final dataset with SIDs to: {HUB_SIDS_DATASET_ID}")
-    final_dataset.push_to_hub(HUB_SIDS_DATASET_ID, private=False)
-    
-    print("\n✅ Process Complete. Final dataset is available on the Hugging Face Hub.")
-    print(f"Dataset URL: https://huggingface.co/datasets/{HUB_SIDS_DATASET_ID}")
+    print("\n--- Dataset Creation Script Finished ---")
 
 if __name__ == '__main__':
     main()
