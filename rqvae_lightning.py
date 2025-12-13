@@ -51,7 +51,16 @@ class MovieEmbeddingDataModule(pl.LightningDataModule):
     """
     A PyTorch Lightning DataModule that works with a pre-generated tensor of embeddings.
     """
-    def __init__(self, embeddings_tensor: torch.Tensor, batch_size: int, num_workers: int = 4):
+    def __init__(self, embeddings_tensor: torch.Tensor, batch_size: int, num_workers: int = 0):
+        """
+        Initializes the DataModule.
+        
+        Args:
+            embeddings_tensor: The tensor containing all embeddings.
+            batch_size: The batch size for the dataloaders.
+            num_workers: The number of worker processes for data loading. 
+                         Defaults to 0 to prevent CUDA forking issues in certain environments.
+        """
         super().__init__()
         self.embeddings_tensor = embeddings_tensor
         self.batch_size = batch_size
@@ -72,7 +81,10 @@ class MovieEmbeddingDataModule(pl.LightningDataModule):
         print(f"Data split into {len(self.train_dataset)} training and {len(self.val_dataset)} validation samples.")
 
     def train_dataloader(self):
-        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, persistent_workers=True)
+        # persistent_workers is only valid for num_workers > 0
+        persistent = self.num_workers > 0
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, persistent_workers=persistent)
 
     def val_dataloader(self):
-        return DataLoader(self.val_dataset, batch_size=self.batch_size, num_workers=self.num_workers, persistent_workers=True)
+        persistent = self.num_workers > 0
+        return DataLoader(self.val_dataset, batch_size=self.batch_size, num_workers=self.num_workers, persistent_workers=persistent)
