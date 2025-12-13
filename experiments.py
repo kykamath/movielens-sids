@@ -29,7 +29,12 @@ EXPERIMENTS: dict[str, ExperimentConfig] = {
     ),
     "kalm-gemma": ExperimentConfig(
         embedding_model_name='tencent/KaLM-Embedding-Gemma3-12B-2511',
-        embedding_dim=4096,  # Note: Verify this dimension from the model card
+        embedding_dim=4096,
         hub_model_id="krishnakamath/rq-vae-movielens-kalm-gemma"
+    ),
+    "nemotron-8b": ExperimentConfig(
+        embedding_model_name='nvidia/llama-embed-nemotron-8b',
+        embedding_dim=8192,
+        hub_model_id="krishnakamath/rq-vae-movielens-nemotron-8b"
     )
 }
