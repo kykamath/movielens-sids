@@ -17,8 +17,6 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 from typing import Optional
-from packaging import version
-import huggingface_hub
 
 from embedding_utils import generate_embeddings, get_embedding_column_name
 from experiments import ExperimentConfig
@@ -192,37 +190,28 @@ class RQVAEOrchestrator:
         )
         print(f"✅ Model successfully uploaded to {self.config.hub_model_id}")
 
-        # --- 2. Tag the Commit (with backward compatibility) ---
+        # --- 2. Tag the Commit (Universal Method) ---
         print(f"Updating tag with version: '{self.config.experiment_name}'")
         api = HfApi()
         
-        # Check if the installed library version supports exists_ok
-        if version.parse(huggingface_hub.__version__) >= version.parse("0.20.0"):
-            api.create_tag(
-                repo_id=self.config.hub_model_id,
-                tag=self.config.experiment_name,
-                tag_message=f"Model for experiment '{self.config.experiment_name}'",
-                revision=commit_info.oid,
-                repo_type="model",
-                exists_ok=True
-            )
-        else:
-            # Fallback for older versions: delete the tag first, then create it.
-            try:
-                api.delete_tag(repo_id=self.config.hub_model_id, tag=self.config.experiment_name)
-                print(f"Deleted existing tag '{self.config.experiment_name}' to update it.")
-            except HfHubHTTPError:
-                # This is expected if the tag doesn't exist yet.
-                pass
-            api.create_tag(
-                repo_id=self.config.hub_model_id,
-                tag=self.config.experiment_name,
-                tag_message=f"Model for experiment '{self.config.experiment_name}'",
-                revision=commit_info.oid,
-                repo_type="model"
-            )
+        # Delete the tag first, ignoring if it doesn't exist.
+        try:
+            api.delete_tag(repo_id=self.config.hub_model_id, tag=self.config.experiment_name)
+            print(f"Deleted existing tag '{self.config.experiment_name}' to update it.")
+        except HfHubHTTPError:
+            # This is expected if the tag doesn't exist on the first run.
+            pass
         
-        print(f"✅ Successfully updated tag '{self.config.experiment_name}'")
+        # Create the new tag pointing to the latest commit.
+        api.create_tag(
+            repo_id=self.config.hub_model_id,
+            tag=self.config.experiment_name,
+            tag_message=f"Model for experiment '{self.config.experiment_name}'",
+            revision=commit_info.oid,
+            repo_type="model"
+        )
+        
+        print(f"✅ Successfully created/updated tag '{self.config.experiment_name}'")
 
         # --- 3. Upload TensorBoard Logs ---
         print(f"Uploading TensorBoard logs from: {logger.log_dir}")
