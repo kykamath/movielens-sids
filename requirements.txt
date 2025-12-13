@@ -1,10 +1,14 @@
 datasets
-transformers
+# Pinning key libraries to ensure compatibility and feature availability
+transformers>=4.41.0
+huggingface-hub>=0.23.0
+sentence-transformers>=2.7.0
+pytorch-lightning>=2.2.0
+
+# Other libraries
 openai
 python-dotenv
-sentence-transformers
 pytest
-pytorch-lightning
 tensorboard
 umap-learn
 plotly
