@@ -10,7 +10,7 @@ from dataclasses import dataclass, asdict
 import os
 import torch
 from dotenv import load_dotenv
-from huggingface_hub import login, HfApi
+from huggingface_hub import login, HfApi, upload_folder
 from datasets import load_dataset, Dataset
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
@@ -60,27 +60,22 @@ class PipelineConfig:
         self.dummy_run = dummy_run
         self.smoke_test = smoke_test
 
-        # 1. Apply experiment overrides first
         if experiment_config:
             print(f"Applying config for experiment: {experiment_name}")
-            # Use asdict to convert dataclass to dict for iteration
             for key, value in asdict(experiment_config).items():
                 if hasattr(self, key):
                     setattr(self, key, value)
         
-        # 2. Apply smoke test overrides
         if self.smoke_test:
             print("--- SMOKE TEST ACTIVATED ---")
             self.epochs = 2
             self.batch_size = 8
             self.max_data_samples = 64
-            # The version tag will be the experiment name with a -smoke-test suffix
             if self.experiment_name:
                 self.experiment_name += "-smoke-test"
             else:
                 self.experiment_name = "smoke-test"
 
-        # 3. Dummy run overrides everything
         if self.dummy_run:
             print("--- DUMMY RUN ACTIVATED ---")
             self.epochs = 1
@@ -105,79 +100,60 @@ class PipelineConfig:
         else:
             print("Warning: HUGGING_FACE_HUB_TOKEN not found. Uploads will be skipped.")
 
-# --- Pipeline Components (The rest of the file is largely unchanged) ---
+# --- Pipeline Components ---
 
 class DatasetManager:
-    """Handles loading and preparation of datasets."""
+    # ... (No changes here)
     def __init__(self, config: PipelineConfig):
         self.config = config
-
     def load_source_dataset(self) -> Dataset:
-        """Loads the source enriched dataset from the Hub, slicing if needed."""
         print(f"Loading source dataset from: {self.config.enriched_repo_id}")
         dataset = load_dataset(self.config.enriched_repo_id, split="train")
         if self.config.max_data_samples:
             print(f"Slicing dataset to {self.config.max_data_samples} samples.")
             dataset = dataset.select(range(self.config.max_data_samples))
         return dataset
-
     def create_final_dataset(self, source_dataset: Dataset, embeddings: list, sids: list, items_with_plots_indices: list) -> Dataset:
-        """Combines source data with new embeddings and SIDs to create the final dataset."""
         embedding_column_name = get_embedding_column_name(self.config.embedding_model_name)
         print(f"Using new embedding column name: '{embedding_column_name}'")
-
         movie_id_to_embedding = {source_dataset[i]['movie_id']: emb for i, emb in zip(items_with_plots_indices, embeddings)}
         movie_id_to_sid = {source_dataset[i]['movie_id']: sid for i, sid in zip(items_with_plots_indices, sids)}
-
         def add_embeddings_and_sids(example):
             movie_id = example['movie_id']
             example[embedding_column_name] = movie_id_to_embedding.get(movie_id, [])
             example['semantic_id'] = movie_id_to_sid.get(movie_id, [])
             return example
-
         final_dataset = source_dataset.map(add_embeddings_and_sids)
-        
         columns_to_remove = [col for col in final_dataset.column_names if 'embedding' in col and col != embedding_column_name]
         if columns_to_remove:
             print(f"Removing old embedding columns: {columns_to_remove}")
             final_dataset = final_dataset.remove_columns(columns_to_remove)
-            
         return final_dataset
-
     def push_to_hub(self, dataset: Dataset):
-        """Pushes a dataset to the Hub, skipping if in dummy mode."""
         if self.config.dummy_run:
             print("Dummy run: Skipping dataset upload to Hugging Face Hub.")
             return
-            
         print(f"\nUploading final dataset to: {self.config.sids_dataset_id}")
         dataset.push_to_hub(self.config.sids_dataset_id, private=False)
         print(f"✅ Dataset available at: https://huggingface.co/datasets/{self.config.sids_dataset_id}")
 
-
 class EmbeddingManager:
-    """Manages the generation of embeddings."""
+    # ... (No changes here)
     def __init__(self, config: PipelineConfig):
         self.config = config
-
     def generate(self, source_dataset: Dataset) -> (torch.Tensor, list, list):
-        """Generates embeddings for the movie data."""
         texts_to_embed = []
         items_with_plots_indices = []
-        
         print("Preparing texts for embedding generation...")
         for i, item in enumerate(source_dataset):
             if item.get('plot_summary'):
                 movie = Movie(movie_id=item.get('movie_id'), title=item.get('title'), genres=item.get('genres', []), plot_summary=item.get('plot_summary', ''), director=item.get('director', ''), stars=item.get('stars', []))
                 texts_to_embed.append(movie.to_embedding_string())
                 items_with_plots_indices.append(i)
-
         if not texts_to_embed:
             raise ValueError("No valid texts found to generate embeddings.")
-
         embeddings = generate_embeddings(model_name=self.config.embedding_model_name, texts_to_embed=texts_to_embed, device=self.config.device)
         return torch.tensor(embeddings, dtype=torch.float32).to(self.config.device), items_with_plots_indices, embeddings.tolist()
-
 
 class RQVAEOrchestrator:
     """Manages the training, loading, and inference of the RQ-VAE model."""
@@ -225,16 +201,17 @@ class RQVAEOrchestrator:
         print(f"\n--- Training Complete for Experiment: {log_name} ---")
         
         if self.config.hf_token and checkpoint.best_model_path and not self.config.dummy_run:
-            self._publish(checkpoint)
+            self._publish(checkpoint, logger) # Pass the logger object
         else:
             print("\nDummy run or token not found: Skipping model upload.")
 
-    def _publish(self, checkpoint_callback: ModelCheckpoint):
-        """Uploads the best model to the Hub and tags it with the experiment name."""
+    def _publish(self, checkpoint_callback: ModelCheckpoint, logger: TensorBoardLogger):
+        """Uploads the best model and its TensorBoard logs to the Hub."""
         if not self.config.experiment_name:
-            print("\nExperiment name not set, skipping model tagging.")
+            print("\nExperiment name not set, skipping model upload and tagging.")
             return
 
+        # --- 1. Upload Model ---
         print(f"\nUploading best model from '{checkpoint_callback.best_model_path}' to Hub: {self.config.hub_model_id}")
         best_model = RQVAE.load_from_checkpoint(checkpoint_callback.best_model_path)
         quantizer_model = best_model.quantizer
@@ -245,6 +222,7 @@ class RQVAEOrchestrator:
         )
         print(f"✅ Model successfully uploaded to {self.config.hub_model_id}")
 
+        # --- 2. Tag the Commit ---
         print(f"Tagging commit with version: '{self.config.experiment_name}'")
         api = HfApi()
         api.create_tag(
@@ -256,20 +234,27 @@ class RQVAEOrchestrator:
         )
         print(f"✅ Successfully tagged commit with '{self.config.experiment_name}'")
 
+        # --- 3. Upload TensorBoard Logs ---
+        print(f"Uploading TensorBoard logs from: {logger.log_dir}")
+        try:
+            upload_folder(
+                folder_path=logger.log_dir,
+                repo_id=self.config.hub_model_id,
+                path_in_repo=f"tensorboard/{self.config.experiment_name}",
+                repo_type="model",
+                commit_message=f"Add TensorBoard logs for {self.config.experiment_name}"
+            )
+            print(f"✅ Successfully uploaded logs to tensorboard/{self.config.experiment_name}")
+        except Exception as e:
+            print(f"⚠️ Could not upload TensorBoard logs. Error: {e}")
+
+
     def load_from_hub(self, revision: Optional[str] = None) -> ResidualQuantizer:
-        """Loads a pre-trained model. In dummy mode, initializes a new model instead."""
+        # ... (No changes here)
         if self.config.dummy_run:
             print("Dummy run: Initializing a new, untrained model for inference.")
-            dummy_model = RQVAE(
-                num_layers=self.config.num_layers, 
-                num_embeddings=self.config.num_embeddings, 
-                embedding_dim=self.config.embedding_dim,
-                commitment_cost=self.config.commitment_cost,
-                learning_rate=self.config.learning_rate
-            ).quantizer
+            dummy_model = RQVAE(num_layers=self.config.num_layers, num_embeddings=self.config.num_embeddings, embedding_dim=self.config.embedding_dim, commitment_cost=self.config.commitment_cost, learning_rate=self.config.learning_rate).quantizer
             return dummy_model.to(self.config.device)
-
-        # The revision is now the experiment name (e.g., "roberta-large" or "roberta-large-smoke-test")
         revision = revision or self.config.experiment_name or "main"
         print(f"Loading pre-trained RQ-VAE model from: {self.config.hub_model_id} at revision '{revision}'")
         try:
@@ -281,7 +266,7 @@ class RQVAEOrchestrator:
             raise RuntimeError(f"Could not load model from Hub. Error: {e}")
 
     def generate_sids(self, model: ResidualQuantizer, embeddings_tensor: torch.Tensor) -> list:
-        """Generates Semantic IDs from embeddings using the pre-trained model."""
+        # ... (No changes here)
         print("Generating Semantic IDs from embeddings...")
         with torch.no_grad():
             _, sids_tensor, _ = model(embeddings_tensor)
