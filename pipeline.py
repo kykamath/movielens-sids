@@ -28,26 +28,24 @@ from residual_quantized_vae import ResidualQuantizer
 @dataclass
 class PipelineConfig:
     """Holds all configuration parameters for the pipeline, with support for experiment overrides."""
-    # Hugging Face Hub IDs
+    # --- Central Hub Repositories ---
     enriched_repo_id: str = "krishnakamath/movielens-32m-movies-enriched"
     sids_dataset_id: str = "krishnakamath/movielens-32m-movies-enriched-with-SIDs"
-    hub_model_id: str = "krishnakamath/rq-vae-movielens"
+    hub_model_id: str = "krishnakamath/rq-vae-movielens"  # Canonical model repo
     
-    # Embedding Model
+    # --- Default Model Parameters ---
     embedding_model_name: str = 'sentence-transformers/all-mpnet-base-v2'
-    
-    # RQ-VAE Model Hyperparameters
     embedding_dim: int = 768
     num_layers: int = 4
     num_embeddings: int = 1024
     commitment_cost: float = 0.25
     
-    # Training Hyperparameters
+    # --- Default Training Hyperparameters ---
     learning_rate: float = 1e-4
     batch_size: int = 128
     epochs: int = 500
     
-    # System and Experiment Config
+    # --- System and Experiment Config ---
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     experiment_name: Optional[str] = None
     dummy_run: bool = False
@@ -65,6 +63,7 @@ class PipelineConfig:
         # 1. Apply experiment overrides first
         if experiment_config:
             print(f"Applying config for experiment: {experiment_name}")
+            # Use asdict to convert dataclass to dict for iteration
             for key, value in asdict(experiment_config).items():
                 if hasattr(self, key):
                     setattr(self, key, value)
@@ -75,8 +74,7 @@ class PipelineConfig:
             self.epochs = 2
             self.batch_size = 8
             self.max_data_samples = 64
-            if self.hub_model_id:
-                self.hub_model_id += "-smoke-test"
+            # The version tag will be the experiment name with a -smoke-test suffix
             if self.experiment_name:
                 self.experiment_name += "-smoke-test"
             else:
@@ -93,14 +91,12 @@ class PipelineConfig:
             else:
                  self.experiment_name = "dummy"
 
-
         self._handle_auth()
 
     def _handle_auth(self):
         """Handle authentication after initialization."""
         load_dotenv()
         self.hf_token = os.environ.get("HUGGING_FACE_HUB_TOKEN")
-        # Log in if we have a token and this is NOT a dummy run
         if self.hf_token and not self.dummy_run:
             print("Logging in to Hugging Face Hub...")
             login(token=self.hf_token)
@@ -109,7 +105,7 @@ class PipelineConfig:
         else:
             print("Warning: HUGGING_FACE_HUB_TOKEN not found. Uploads will be skipped.")
 
-# --- Pipeline Components ---
+# --- Pipeline Components (The rest of the file is largely unchanged) ---
 
 class DatasetManager:
     """Handles loading and preparation of datasets."""
@@ -197,8 +193,6 @@ class RQVAEOrchestrator:
         source_dataset = dataset_manager.load_source_dataset()
         embeddings_tensor, _, _ = embedding_manager.generate(source_dataset)
 
-        # *** THIS IS THE FIX ***
-        # Determine embedding dimension directly from the generated tensor
         actual_embedding_dim = embeddings_tensor.shape[1]
         print(f"Actual embedding dimension determined from data: {actual_embedding_dim}")
         self.config.embedding_dim = actual_embedding_dim
@@ -211,7 +205,7 @@ class RQVAEOrchestrator:
         self.model = RQVAE(
             num_layers=self.config.num_layers, 
             num_embeddings=self.config.num_embeddings, 
-            embedding_dim=self.config.embedding_dim, # Now uses the correct dimension
+            embedding_dim=self.config.embedding_dim,
             commitment_cost=self.config.commitment_cost, 
             learning_rate=self.config.learning_rate
         )
@@ -237,8 +231,8 @@ class RQVAEOrchestrator:
 
     def _publish(self, checkpoint_callback: ModelCheckpoint):
         """Uploads the best model to the Hub and tags it with the experiment name."""
-        if not self.config.experiment_name or "dummy" in self.config.experiment_name:
-            print("\nSkipping model upload for dummy run.")
+        if not self.config.experiment_name:
+            print("\nExperiment name not set, skipping model tagging.")
             return
 
         print(f"\nUploading best model from '{checkpoint_callback.best_model_path}' to Hub: {self.config.hub_model_id}")
@@ -251,7 +245,7 @@ class RQVAEOrchestrator:
         )
         print(f"✅ Model successfully uploaded to {self.config.hub_model_id}")
 
-        print(f"Tagging commit with experiment name: '{self.config.experiment_name}'")
+        print(f"Tagging commit with version: '{self.config.experiment_name}'")
         api = HfApi()
         api.create_tag(
             repo_id=self.config.hub_model_id,
@@ -275,6 +269,7 @@ class RQVAEOrchestrator:
             ).quantizer
             return dummy_model.to(self.config.device)
 
+        # The revision is now the experiment name (e.g., "roberta-large" or "roberta-large-smoke-test")
         revision = revision or self.config.experiment_name or "main"
         print(f"Loading pre-trained RQ-VAE model from: {self.config.hub_model_id} at revision '{revision}'")
         try:
