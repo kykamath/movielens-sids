@@ -35,7 +35,8 @@ def generate_embeddings(
         A numpy array of the generated embeddings.
     """
     print(f"Loading sentence transformer model: '{model_name}'...")
-    embedding_model = SentenceTransformer(model_name)
+    # Pass trust_remote_code=True to allow custom model architectures to be loaded.
+    embedding_model = SentenceTransformer(model_name, trust_remote_code=True)
     
     print(f"Generating embeddings for {len(texts_to_embed)} texts...")
     embeddings = embedding_model.encode(
