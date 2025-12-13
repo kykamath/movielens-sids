@@ -17,7 +17,7 @@ class ExperimentConfig:
 # --- Experiment Definitions ---
 
 EXPERIMENTS: dict[str, ExperimentConfig] = {
-    "baseline": ExperimentConfig(
+    "mpnet-base": ExperimentConfig(
         embedding_model_name='sentence-transformers/all-mpnet-base-v2',
         embedding_dim=768
     ),
