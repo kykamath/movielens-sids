@@ -40,7 +40,7 @@ from experiments import EXPERIMENTS, ExperimentConfig
 
 # --- Configuration ---
 # A few interesting movies to test the semantic search on.
-PROBE_MOVIES = ["The Matrix", "Toy Story", "The Godfather", "Pulp Fiction"]
+PROBE_MOVIES = ["Matrix, The (1999)", "Toy Story (1995)", "Godfather, The (1972)", "Pulp Fiction (1994)"]
 TOP_K = 5 # Number of nearest neighbors to find
 
 def find_nearest_neighbors(sids: np.ndarray, query_sid: np.ndarray, k: int):
