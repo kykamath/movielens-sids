@@ -14,15 +14,20 @@ This script can be run from the command line with the following arguments:
 --experiments [name1] [name2] ...
     Description:
         A required list of one or more experiment names to evaluate and compare.
+        This can include base experiment names (e.g., 'mpnet-base') or their
+        smoke test variants (e.g., 'mpnet-base-smoke-test').
         The script will load the corresponding model version for each experiment
         from the Hugging Face Hub (based on the version tag).
 
     Usage:
-        # Compare the baseline and roberta-large models
-        python evaluate.py --experiments baseline roberta-large
+        # Compare the base mpnet and roberta-large models
+        python evaluate.py --experiments mpnet-base roberta-large
 
-        # Evaluate a single experiment
-        python evaluate.py --experiments nemotron-8b
+        # Evaluate a smoke test version of the nemotron-8b model
+        python evaluate.py --experiments nemotron-8b-smoke-test
+
+        # Compare a full experiment with its smoke test counterpart
+        python evaluate.py --experiments roberta-large roberta-large-smoke-test
 """
 
 import argparse
@@ -31,7 +36,7 @@ import numpy as np
 from scipy.spatial.distance import cdist
 
 from pipeline import PipelineConfig, DatasetManager, EmbeddingManager, RQVAEOrchestrator
-from experiments import EXPERIMENTS
+from experiments import EXPERIMENTS, ExperimentConfig
 
 # --- Configuration ---
 # A few interesting movies to test the semantic search on.
@@ -47,6 +52,15 @@ def find_nearest_neighbors(sids: np.ndarray, query_sid: np.ndarray, k: int):
     return nearest_indices, distances[nearest_indices]
 
 def main():
+    # Generate all possible experiment choices for argparse
+    all_experiment_choices = list(EXPERIMENTS.keys())
+    for exp_name in list(EXPERIMENTS.keys()): # Iterate over a copy to modify
+        all_experiment_choices.append(f"{exp_name}-smoke-test")
+    # Add a generic smoke-test option if it's not tied to a specific experiment
+    if "smoke-test" not in all_experiment_choices:
+        all_experiment_choices.append("smoke-test")
+
+
     parser = argparse.ArgumentParser(
         description="Compare semantic quality of models from different experiments.",
         formatter_class=argparse.RawTextHelpFormatter
@@ -56,15 +70,16 @@ def main():
         type=str, 
         nargs='+', # Accepts one or more experiment names
         required=True,
-        choices=list(EXPERIMENTS.keys()),
-        help='A list of experiment names to compare.'
+        choices=all_experiment_choices,
+        help='A list of experiment names to compare. Can include smoke test variants.'
     )
     args = parser.parse_args()
 
     # --- 1. Load Data ---
     # We only need to do this once, as all models use the same source data.
     print("--- Loading source data... ---")
-    base_config = PipelineConfig() # Default config is fine for loading data
+    # For data loading, we use a base config with progress bar disabled
+    base_config = PipelineConfig(enable_progress_bar=False) 
     dataset_manager = DatasetManager(base_config)
     source_dataset = dataset_manager.load_source_dataset()
     
@@ -73,15 +88,38 @@ def main():
     movie_titles = [item['title'] for item in source_dataset]
 
     # --- 2. Iterate Through Experiments and Evaluate ---
-    for experiment_name in args.experiments:
-        print(f"\n\n--- Evaluating Experiment: {experiment_name} ---")
+    for experiment_full_name in args.experiments:
+        print(f"\n\n--- Evaluating Experiment: {experiment_full_name} ---")
         
+        # Determine if this is a smoke test variant
+        is_smoke_test_variant = experiment_full_name.endswith("-smoke-test")
+        
+        # Extract the base experiment name if it's a smoke test variant
+        if is_smoke_test_variant:
+            base_experiment_name = experiment_full_name.replace("-smoke-test", "")
+            # If the base name is "smoke-test", then it's a generic smoke test, not tied to a specific experiment
+            if base_experiment_name == "smoke-test":
+                experiment_config_obj = None # Use default config for generic smoke test
+            else:
+                experiment_config_obj = EXPERIMENTS.get(base_experiment_name)
+        else:
+            base_experiment_name = experiment_full_name
+            experiment_config_obj = EXPERIMENTS.get(base_experiment_name)
+
         # A. Configure and load the specific model for the experiment
-        experiment_config = EXPERIMENTS[experiment_name]
-        config = PipelineConfig(experiment_name=experiment_name, experiment_config=experiment_config)
+        # Pass smoke_test=True if it's a smoke test variant to ensure correct tag loading
+        config = PipelineConfig(
+            experiment_name=base_experiment_name, # Use base name for config lookup
+            experiment_config=experiment_config_obj, 
+            smoke_test=is_smoke_test_variant,
+            enable_progress_bar=False # Ensure progress bar is off for evaluation
+        )
+        # Override experiment_name in config to match the full name for loading the tag
+        config.experiment_name = experiment_full_name 
+
         model_orchestrator = RQVAEOrchestrator(config)
 
-        # B. We need to generate embeddings using the *correct* model for this experiment
+        # B. Generate embeddings using the *correct* model for this experiment
         print(f"Generating embeddings with this experiment's model: {config.embedding_model_name}")
         exp_embedding_manager = EmbeddingManager(config)
         embeddings_tensor, _, _ = exp_embedding_manager.generate(source_dataset)

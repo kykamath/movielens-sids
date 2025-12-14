@@ -28,33 +28,67 @@ from residual_quantized_vae import ResidualQuantizer
 
 @dataclass
 class PipelineConfig:
-    # ... (No changes in this class)
+    """Holds all configuration parameters for the pipeline, with support for experiment overrides."""
+    # --- Central Hub Repositories ---
     enriched_repo_id: str = "krishnakamath/movielens-32m-movies-enriched"
     sids_dataset_id: str = "krishnakamath/movielens-32m-movies-enriched-with-SIDs"
-    hub_model_id: str = "krishnakamath/rq-vae-movielens"
+    hub_model_id: str = "krishnakamath/rq-vae-movielens"  # Canonical model repo
+    
+    # --- Default Model Parameters ---
     embedding_model_name: str = 'sentence-transformers/all-mpnet-base-v2'
     embedding_dim: int = 768
     num_layers: int = 4
     num_embeddings: int = 1024
     commitment_cost: float = 0.25
+    
+    # --- Default Training Hyperparameters ---
     learning_rate: float = 1e-4
     batch_size: int = 128
     epochs: int = 500
+    log_every_n_steps: int = 50 # New: How often to log training metrics
+    enable_progress_bar: bool = True # New: Control progress bar visibility
+    
+    # --- System and Experiment Config ---
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     experiment_name: Optional[str] = None
     dummy_run: bool = False
     smoke_test: bool = False
     max_data_samples: Optional[int] = None
 
-    def __init__(self, experiment_name: Optional[str] = None, experiment_config: Optional[ExperimentConfig] = None, dummy_run: bool = False, smoke_test: bool = False):
+    def __init__(self, experiment_name: Optional[str] = None, experiment_config: Optional[ExperimentConfig] = None, dummy_run: bool = False, smoke_test: bool = False, enable_progress_bar: Optional[bool] = None):
+        """
+        Initializes the configuration, layering settings: defaults -> experiment -> smoke/dummy.
+        """
+        # Initialize dataclass fields with defaults first
+        # This is a common pattern when a custom __init__ is used with dataclasses
+        # to ensure all fields are set.
+        self.enriched_repo_id = "krishnakamath/movielens-32m-movies-enriched"
+        self.sids_dataset_id = "krishnakamath/movielens-32m-movies-enriched-with-SIDs"
+        self.hub_model_id = "krishnakamath/rq-vae-movielens"
+        self.embedding_model_name = 'sentence-transformers/all-mpnet-base-v2'
+        self.embedding_dim = 768
+        self.num_layers = 4
+        self.num_embeddings = 1024
+        self.commitment_cost = 0.25
+        self.learning_rate = 1e-4
+        self.batch_size = 128
+        self.epochs = 500
+        self.log_every_n_steps = 50
+        self.enable_progress_bar = True
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.experiment_name = experiment_name
         self.dummy_run = dummy_run
         self.smoke_test = smoke_test
+        self.max_data_samples = None # Default value
+
+        # Apply experiment overrides first
         if experiment_config:
             print(f"Applying config for experiment: {experiment_name}")
             for key, value in asdict(experiment_config).items():
                 if hasattr(self, key):
                     setattr(self, key, value)
+        
+        # Apply smoke test overrides
         if self.smoke_test:
             print("--- SMOKE TEST ACTIVATED ---")
             self.epochs = 2
@@ -64,6 +98,10 @@ class PipelineConfig:
                 self.experiment_name += "-smoke-test"
             else:
                 self.experiment_name = "smoke-test"
+            self.log_every_n_steps = 1
+            self.enable_progress_bar = False
+
+        # Dummy run overrides everything
         if self.dummy_run:
             print("--- DUMMY RUN ACTIVATED ---")
             self.epochs = 1
@@ -73,6 +111,13 @@ class PipelineConfig:
                  self.experiment_name = f"{self.experiment_name}-dummy"
             else:
                  self.experiment_name = "dummy"
+            self.log_every_n_steps = 1
+            self.enable_progress_bar = False
+
+        # Apply direct overrides for enable_progress_bar if provided
+        if enable_progress_bar is not None:
+            self.enable_progress_bar = enable_progress_bar
+
         self._handle_auth()
 
     def _handle_auth(self):
@@ -89,7 +134,6 @@ class PipelineConfig:
 # --- Pipeline Components ---
 
 class DatasetManager:
-    # ... (No changes here)
     def __init__(self, config: PipelineConfig):
         self.config = config
     def load_source_dataset(self) -> Dataset:
@@ -124,7 +168,6 @@ class DatasetManager:
         print(f"✅ Dataset available at: https://huggingface.co/datasets/{self.config.sids_dataset_id}")
 
 class EmbeddingManager:
-    # ... (No changes here)
     def __init__(self, config: PipelineConfig):
         self.config = config
     def generate(self, source_dataset: Dataset) -> (torch.Tensor, list, list):
@@ -138,48 +181,69 @@ class EmbeddingManager:
                 items_with_plots_indices.append(i)
         if not texts_to_embed:
             raise ValueError("No valid texts found to generate embeddings.")
-        embeddings = generate_embeddings(model_name=self.config.embedding_model_name, texts_to_embed=texts_to_embed, device=self.config.device)
+        embeddings = generate_embeddings(model_name=self.config.embedding_model_name, texts_to_embed=texts_to_embed, device=self.config.device, show_progress_bar=self.config.enable_progress_bar)
         return torch.tensor(embeddings, dtype=torch.float32).to(self.config.device), items_with_plots_indices, embeddings.tolist()
 
 class RQVAEOrchestrator:
-    """Manages the training, loading, and inference of the RQ-VAE model."""
     def __init__(self, config: PipelineConfig):
         self.config = config
         self.model = None
 
     def train(self):
-        # ... (No changes here)
         print("--- Generating Embeddings for Training ---")
         dataset_manager = DatasetManager(self.config)
         embedding_manager = EmbeddingManager(self.config)
         source_dataset = dataset_manager.load_source_dataset()
         embeddings_tensor, _, _ = embedding_manager.generate(source_dataset)
+
         actual_embedding_dim = embeddings_tensor.shape[1]
         print(f"Actual embedding dimension determined from data: {actual_embedding_dim}")
         self.config.embedding_dim = actual_embedding_dim
-        data_module = MovieEmbeddingDataModule(embeddings_tensor=embeddings_tensor, batch_size=self.config.batch_size)
-        self.model = RQVAE(num_layers=self.config.num_layers, num_embeddings=self.config.num_embeddings, embedding_dim=self.config.embedding_dim, commitment_cost=self.config.commitment_cost, learning_rate=self.config.learning_rate)
+
+        data_module = MovieEmbeddingDataModule(
+            embeddings_tensor=embeddings_tensor,
+            batch_size=self.config.batch_size
+        )
+
+        self.model = RQVAE(
+            num_layers=self.config.num_layers, 
+            num_embeddings=self.config.num_embeddings, 
+            embedding_dim=self.config.embedding_dim,
+            commitment_cost=self.config.commitment_cost, 
+            learning_rate=self.config.learning_rate
+        )
+
         log_name = self.config.experiment_name or "default"
         logger = TensorBoardLogger("tb_logs", name="rq_vae_model", version=log_name)
+        
         checkpoint_dir = f"checkpoints/{log_name}/"
         checkpoint = ModelCheckpoint(monitor='val_loss', dirpath=checkpoint_dir, filename='best-model', save_top_k=1, mode='min')
+        
         early_stop = EarlyStopping(monitor='val_loss', patience=10, verbose=True, mode='min')
-        trainer = Trainer(max_epochs=self.config.epochs, accelerator="auto", callbacks=[early_stop, checkpoint], logger=logger)
+
+        trainer = Trainer(
+            max_epochs=self.config.epochs, 
+            accelerator="auto", 
+            callbacks=[early_stop, checkpoint], 
+            logger=logger,
+            log_every_n_steps=self.config.log_every_n_steps,
+            enable_progress_bar=self.config.enable_progress_bar
+        )
+
         print(f"--- Starting Training for Experiment: {log_name} ---")
         trainer.fit(self.model, datamodule=data_module)
         print(f"\n--- Training Complete for Experiment: {log_name} ---")
+        
         if self.config.hf_token and checkpoint.best_model_path and not self.config.dummy_run:
             self._publish(checkpoint, logger)
         else:
             print("\nDummy run or token not found: Skipping model upload.")
 
     def _publish(self, checkpoint_callback: ModelCheckpoint, logger: TensorBoardLogger):
-        """Uploads the best model and its TensorBoard logs to the Hub."""
         if not self.config.experiment_name:
             print("\nExperiment name not set, skipping model upload and tagging.")
             return
 
-        # --- 1. Upload Model ---
         print(f"\nUploading best model from '{checkpoint_callback.best_model_path}' to Hub: {self.config.hub_model_id}")
         best_model = RQVAE.load_from_checkpoint(checkpoint_callback.best_model_path)
         quantizer_model = best_model.quantizer
@@ -190,19 +254,15 @@ class RQVAEOrchestrator:
         )
         print(f"✅ Model successfully uploaded to {self.config.hub_model_id}")
 
-        # --- 2. Tag the Commit (Universal Method) ---
         print(f"Updating tag with version: '{self.config.experiment_name}'")
         api = HfApi()
         
-        # Delete the tag first, ignoring if it doesn't exist.
         try:
             api.delete_tag(repo_id=self.config.hub_model_id, tag=self.config.experiment_name)
             print(f"Deleted existing tag '{self.config.experiment_name}' to update it.")
         except HfHubHTTPError:
-            # This is expected if the tag doesn't exist on the first run.
             pass
         
-        # Create the new tag pointing to the latest commit.
         api.create_tag(
             repo_id=self.config.hub_model_id,
             tag=self.config.experiment_name,
@@ -213,7 +273,6 @@ class RQVAEOrchestrator:
         
         print(f"✅ Successfully created/updated tag '{self.config.experiment_name}'")
 
-        # --- 3. Upload TensorBoard Logs ---
         print(f"Uploading TensorBoard logs from: {logger.log_dir}")
         try:
             upload_folder(
@@ -227,9 +286,7 @@ class RQVAEOrchestrator:
         except Exception as e:
             print(f"⚠️ Could not upload TensorBoard logs. Error: {e}")
 
-
     def load_from_hub(self, revision: Optional[str] = None) -> ResidualQuantizer:
-        # ... (No changes here)
         if self.config.dummy_run:
             print("Dummy run: Initializing a new, untrained model for inference.")
             dummy_model = RQVAE(num_layers=self.config.num_layers, num_embeddings=self.config.num_embeddings, embedding_dim=self.config.embedding_dim, commitment_cost=self.config.commitment_cost, learning_rate=self.config.learning_rate).quantizer
@@ -245,7 +302,6 @@ class RQVAEOrchestrator:
             raise RuntimeError(f"Could not load model from Hub. Error: {e}")
 
     def generate_sids(self, model: ResidualQuantizer, embeddings_tensor: torch.Tensor) -> list:
-        # ... (No changes here)
         print("Generating Semantic IDs from embeddings...")
         with torch.no_grad():
             _, sids_tensor, _ = model(embeddings_tensor)
