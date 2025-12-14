@@ -56,7 +56,6 @@ def main():
     all_experiment_choices = list(EXPERIMENTS.keys())
     for exp_name in list(EXPERIMENTS.keys()): # Iterate over a copy to modify
         all_experiment_choices.append(f"{exp_name}-smoke-test")
-    # Add a generic smoke-test option if it's not tied to a specific experiment
     if "smoke-test" not in all_experiment_choices:
         all_experiment_choices.append("smoke-test")
 
@@ -76,14 +75,11 @@ def main():
     args = parser.parse_args()
 
     # --- 1. Load Data ---
-    # We only need to do this once, as all models use the same source data.
     print("--- Loading source data... ---")
-    # For data loading, we use a base config with progress bar disabled
-    base_config = PipelineConfig(enable_progress_bar=False) 
+    base_config = PipelineConfig(enable_progress_bar=True) 
     dataset_manager = DatasetManager(base_config)
     source_dataset = dataset_manager.load_source_dataset()
     
-    # Create a quick lookup from title to item
     title_to_item = {item['title']: item for item in source_dataset}
     movie_titles = [item['title'] for item in source_dataset]
 
@@ -91,15 +87,12 @@ def main():
     for experiment_full_name in args.experiments:
         print(f"\n\n--- Evaluating Experiment: {experiment_full_name} ---")
         
-        # Determine if this is a smoke test variant
         is_smoke_test_variant = experiment_full_name.endswith("-smoke-test")
         
-        # Extract the base experiment name if it's a smoke test variant
         if is_smoke_test_variant:
             base_experiment_name = experiment_full_name.replace("-smoke-test", "")
-            # If the base name is "smoke-test", then it's a generic smoke test, not tied to a specific experiment
             if base_experiment_name == "smoke-test":
-                experiment_config_obj = None # Use default config for generic smoke test
+                experiment_config_obj = None
             else:
                 experiment_config_obj = EXPERIMENTS.get(base_experiment_name)
         else:
@@ -107,14 +100,12 @@ def main():
             experiment_config_obj = EXPERIMENTS.get(base_experiment_name)
 
         # A. Configure and load the specific model for the experiment
-        # Pass smoke_test=True if it's a smoke test variant to ensure correct tag loading
         config = PipelineConfig(
-            experiment_name=base_experiment_name, # Use base name for config lookup
+            experiment_name=base_experiment_name,
             experiment_config=experiment_config_obj, 
             smoke_test=is_smoke_test_variant,
-            enable_progress_bar=False # Ensure progress bar is off for evaluation
+            enable_progress_bar=True # *** THIS IS THE FIX ***
         )
-        # Override experiment_name in config to match the full name for loading the tag
         config.experiment_name = experiment_full_name 
 
         model_orchestrator = RQVAEOrchestrator(config)
@@ -144,7 +135,6 @@ def main():
             print(f"{'Rank':<5} | {'Hamming Distance':<18} | {'Title'}")
             print("-" * 50)
             for i, (idx, dist) in enumerate(zip(neighbor_indices, distances)):
-                # The distance is a proportion; multiply by SID length for raw bit difference
                 raw_dist = int(dist * sids.shape[1])
                 print(f"{i+1:<5} | {dist:<18.4f} ({raw_dist} bits) | {movie_titles[idx]}")
 
